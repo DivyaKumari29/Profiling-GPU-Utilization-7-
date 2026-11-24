@@ -16,9 +16,7 @@ This repository contains the code, results, graphs and report for profiling a GP
 8. [Kernel Classification (Compute-bound vs Memory-bound)](#8-kernel-classification-compute-bound-vs-memory-bound)
 9. [Bottlenecks Found and Fixes Applied](#9-bottlenecks-found-and-fixes-applied)
 10. [Conclusion](#10-conclusion)
-11. [Viva Questions and Answers](#11-viva-questions-and-answers)
-12. [Limitations and Notes](#12-limitations-and-notes)
-13. [How to Reproduce](#13-how-to-reproduce)
+
 
 ---
 
@@ -265,54 +263,5 @@ The GEMM is far above the ridge point. All element-wise kernels and the reductio
 Profiling the baseline showed that the GPU was busy only about 61 % of the time, because host-to-device copies from pageable memory and the kernels ran one after another. Using pinned memory and two CUDA streams with double buffering hid the copy behind the computation. Total run time fell from 2.498 s to 1.502 s (**1.66× speedup**), throughput rose from 80.1 to 133.2 batches/s (+66 %), and the checksum stayed identical, which confirms the results are correct. After the fix, the program is limited by the GEMM kernels (compute-bound), which is the desired state, because the GPU is doing useful work instead of waiting.
 
 The key trends are clear: total time is down, copy time is reduced, and utilization is up. The gain is limited by the compute kernels, which cannot be made shorter by overlapping copies.
-
-## 11. Viva Questions and Answers
-
-**1. Define GPU utilization. Why can `nvidia-smi` show 100 % even when the GPU is not fully efficient?**
-GPU utilization is the fraction of time in which at least one kernel is running on the GPU. `nvidia-smi` only checks whether *any* kernel is active in a sampling period. It does not show how many compute units are used, so a small or inefficient kernel can still show 100 %.
-
-**2. Why is pinned memory faster than pageable memory for host-to-device transfers?**
-Pageable memory may be moved by the OS, so the driver must first copy it into a pinned staging buffer and then transfer it. Pinned memory is page-locked, so the GPU's DMA engine reads it directly. This removes the extra copy and also allows asynchronous transfers.
-
-**3. Why does overlapping copy and compute need two streams, and why are two device buffers needed?**
-Work inside one stream runs in order, so copy and compute in the same stream cannot overlap. A copy stream and a compute stream can run at the same time. Two device buffers are needed so that one buffer can be filled with the next batch while the kernels still use the other buffer.
-
-**4. Define arithmetic intensity and ridge point. Is a GEMM always compute-bound? What if the matrix is tiny?**
-Arithmetic intensity = FLOPs / bytes moved from memory. Ridge point = peak FLOP/s / peak memory bandwidth. A GEMM is not always compute-bound. For a tiny matrix, there is little reuse of data, the AI falls below the ridge point, and the kernel becomes memory-bound (or limited by launch overhead).
-
-**5. After the optimization, the speedup was less than the theoretical limit. Give two reasons.**
-(a) The first copy cannot be hidden and the last result copy must finish at the end (pipeline start and end). (b) Copy and compute share GPU memory bandwidth and the PCIe link, and the element-wise kernels are memory-bound, so they compete with the copy engine. Other reasons: driver limits on concurrency (for example WDDM on Windows) and launch overhead.
-
-**6. Why must the checksum of the two versions match?**
-Both versions do the same calculation on the same data. If the checksums differ, the optimization has changed the result, for example through a data race between the streams, so the faster program would be wrong.
-
-## 12. Limitations and Notes
-
-- **Analyzer output.** In Screenshot 2, `analyze_trace.py` reports *Number of GPU events: 0* for both traces. This is likely because GPU events were recorded under a different category name, or CUPTI did not capture GPU activity on this Windows setup. Therefore, utilization, idle time and copy overlap in this report are estimated from the PyTorch profiler table instead of the analyzer.
-- **GPU specification values** (about 39.6 TFLOP/s FP32 and 432 GB/s) are taken from the public spec sheet.
-- **Profiled window** covers 10 batches, while the timing results cover 200 batches.
-- Results are for one GPU and one run; values may vary slightly between runs.
-
-## 13. How to Reproduce
-
-```bash
-git clone <your-repo-url>
-cd gpu-profiling-experiment
-pip install -r requirements.txt          # use the CUDA index URL for torch if needed
-
-# optional: log GPU utilization in a second terminal
-nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv -lms 100 > smi_baseline.csv
-
-python src/gpu_workload.py --mode baseline  --profile
-python src/gpu_workload.py --mode optimized --profile
-python src/analyze_trace.py trace_baseline.json trace_optimized.json
-
-# regenerate graphs
-python src/make_charts.py
-```
-
-**Further tests:** run with `--reps 1` and `--reps 8`. When compute per batch is much smaller than copy time, the optimized version is limited by the copy (PCIe bandwidth). When compute is much larger, it is limited by the compute kernels and the copy is fully hidden.
-
-**Troubleshooting:** if you run out of GPU memory, add `--rows 8192`. If `nvidia-smi` shows few samples, use `--batches 400`.
 
 ---
